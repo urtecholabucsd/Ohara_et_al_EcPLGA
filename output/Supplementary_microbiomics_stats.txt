@@ -1,0 +1,50 @@
+
+--- AUC of BC-from-T0, Kruskal-Wallis across 3 groups ---
+
+	Kruskal-Wallis rank sum test
+
+data:  auc by Vaccine Administered
+Kruskal-Wallis chi-squared = 1.6654, df = 2, p-value = 0.4349
+
+Group AUC mean +/- sd:
+# A tibble: 3 × 4
+  `Vaccine Administered`  mean    sd     n
+  <fct>                  <dbl> <dbl> <int>
+1 RBC-PLGA                12.8  1.72    10
+2 WT EC-PLGA              12.4  1.85     9
+3 ΔlpxM EC-PLGA           12.3  1.42    10
+Pairwise Mann-Whitney (RBC vs each treatment):
+
+	Pairwise comparisons using Wilcoxon rank sum exact test 
+
+data:  auc_df$auc and auc_df$`Vaccine Administered` 
+
+              RBC-PLGA WT EC-PLGA
+WT EC-PLGA    0.40     -         
+ΔlpxM EC-PLGA 0.22     1.00      
+
+P value adjustment method: none 
+
+--- PERMANOVA (genus Bray-Curtis) ---
+Permutation test for adonis under reduced model
+Terms added sequentially (first to last)
+Permutation: free
+Number of permutations: 4999
+
+adonis2(formula = bc_all ~ `Vaccine Administered` * Day, data = perm_meta, permutations = 4999, by = "terms")
+                            Df SumOfSqs      R2       F Pr(>F)    
+`Vaccine Administered`       2   0.5857 0.04282  6.1024 0.0002 ***
+Day                          1   4.7183 0.34495 98.3287 0.0002 ***
+`Vaccine Administered`:Day   2   0.2648 0.01936  2.7596 0.0122 *  
+Residual                   169   8.1095 0.59287                   
+Total                      174  13.6784 1.00000                   
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+--- Per-day PERMANOVA (treatment), incl. Day 0 pre-injection ---
+Day  0: R2=0.226, p=0.0028
+Day  7: R2=0.155, p=0.0118
+Day 14: R2=0.287, p=0.0002
+Day 21: R2=0.175, p=0.0106
+Day 28: R2=0.163, p=0.0084
+Day 35: R2=0.182, p=0.0098
