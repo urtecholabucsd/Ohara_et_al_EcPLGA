@@ -243,6 +243,6 @@ row2 <- plot_grid(pB, pC, NULL, labels = c("B", "C", ""), ncol = 3, rel_widths =
 combined <- plot_grid(row1, row2, ncol = 1, rel_heights = c(1, 0.9))
 
 ggsave(file.path(fig_dir, "Supplementary_microbiomics.pdf"),
-       combined, width = 11, height = 6, device = cairo_pdf)
+       combined, width = 11, height = 6)
 ggsave(file.path(fig_dir, "Supplementary_microbiomics.png"),
        combined, width = 11, height = 6, dpi = 300, bg = "white")
