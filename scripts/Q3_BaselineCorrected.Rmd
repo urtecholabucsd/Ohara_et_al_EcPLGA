@@ -1,0 +1,307 @@
+---
+title: "Q3: Baseline-Corrected Microbiome Analyses"
+subtitle: "Within-subject shifts and CLR-delta ordination to account for cage/baseline confounding"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 7, fig.height = 4.5, dpi = 300)
+# Paths are relative to this scripts/ folder (knitr's default working directory).
+# If running chunks interactively in RStudio, set the working directory to scripts/ first.
+dir.create("../figs", showWarnings = FALSE)
+dir.create("../output", showWarnings = FALSE)
+
+```
+
+## Rationale
+
+Cage is completely confounded with treatment (2 cages per group, 5 mice per cage), so pairwise PERMANOVA on raw compositions at Day 0 shows significant group separation before any injection. To disentangle treatment effects from cage effects, we use two approaches that make each mouse its own control.
+
+**Analysis 1** computes the Bray-Curtis distance between each mouse's Day 0 sample and its subsequent timepoints. This scalar measure of "how much did this mouse's microbiome change?" is then compared across groups.
+
+**Analysis 3** subtracts each mouse's Day 0 CLR profile from its later timepoints, producing a vector of genus-level shifts. Ordinating these delta-CLR vectors with PCoA (Euclidean distance on CLR = Aitchison distance) shows whether the *direction* of change differs by treatment, independent of starting composition.
+
+## Load libraries and data
+
+```{r libraries}
+library(tidyverse)
+library(cowplot)
+library(lme4)
+library(lmerTest)
+library(vegan)
+library(ggsignif)
+```
+
+```{r load-data}
+zotu_raw <- read_csv("../input/zotu.csv")
+tax <- read_csv("../ref/tax.csv") %>% select(OTU, domain, phylum, class, order, family, genus)
+
+meta <- readxl::read_xlsx("../ref/MO_Metadata.xlsx", sheet = 1) %>%
+  mutate(seqid = gsub("\\.", "-", Sample)) %>%
+  select(seqid, Mouse, "Day" = "Day...2", "Vaccine Administered", Cage)
+
+dat <- read_csv("../input/20260527_MO_EcoliVax.csv")
+sample_ids <- dat %>% select(seqid, Mouse, Day, `Vaccine Administered`) %>% distinct()
+sample_ids <- sample_ids %>%
+  left_join(meta %>% select(Mouse, Cage) %>% distinct(), by = "Mouse")
+
+# Wide count matrix
+wide <- zotu_raw %>% filter(seqid %in% sample_ids$seqid) %>% column_to_rownames("seqid")
+wide <- wide[sample_ids$seqid, ]
+
+# Collapse to genus level
+otu_to_genus <- tax %>% select(OTU, genus) %>% deframe()
+colnames_genus <- sapply(colnames(wide), function(o) {
+  g <- otu_to_genus[o]
+  if (is.na(g)) "Unclassified" else g
+})
+wide_genus <- t(rowsum(t(wide), group = colnames_genus))
+wide_genus_rel <- sweep(wide_genus, 1, rowSums(wide_genus), "/")
+
+vax_order <- c("RBC-PLGA", "WT EC-PLGA", "-lpxM EC-PLGA")
+vax_colors <- c("RBC-PLGA" = "#636363", "WT EC-PLGA" = "#e6550d", "-lpxM EC-PLGA" = "#3182bd")
+
+sample_ids <- sample_ids %>%
+  mutate(
+    Day = as.integer(Day),
+    Mouse = as.factor(Mouse),
+    Cage = as.factor(Cage),
+    `Vaccine Administered` = factor(`Vaccine Administered`, levels = vax_order)
+  )
+```
+
+## Analysis 1: Within-subject Bray-Curtis distance from Day 0
+
+```{r bc-from-baseline}
+# Get Day 0 sample for each mouse
+d0_map <- sample_ids %>% filter(Day == 0) %>% select(Mouse, seqid) %>% deframe()
+
+bc_from_baseline <- sample_ids %>%
+  filter(Day > 0, Mouse %in% names(d0_map)) %>%
+  rowwise() %>%
+  mutate(
+    bc_from_d0 = vegan::vegdist(
+      rbind(wide_genus_rel[seqid, ], wide_genus_rel[d0_map[as.character(Mouse)], ]),
+      method = "bray"
+    )[1]
+  ) %>%
+  ungroup()
+```
+
+### Line graph: BC distance from baseline over time
+
+```{r Q3-bc-line, fig.width=7, fig.height=4.5}
+summary_bc <- bc_from_baseline %>%
+  group_by(`Vaccine Administered`, Day) %>%
+  summarise(
+    mean_bc = mean(bc_from_d0),
+    sem_bc = sd(bc_from_d0) / sqrt(n()),
+    .groups = "drop"
+  )
+
+p_bc_line <- ggplot(summary_bc, aes(x = Day, y = mean_bc, color = `Vaccine Administered`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_bc - sem_bc, ymax = mean_bc + sem_bc), width = 1.5) +
+  geom_vline(xintercept = c(0, 21), linetype = "dashed", alpha = 0.4) +
+  annotate("text", x = 3, y = max(summary_bc$mean_bc + summary_bc$sem_bc) * 1.05,
+           label = "Injection 1", fontface = "italic", size = 3) +
+  annotate("text", x = 24, y = max(summary_bc$mean_bc + summary_bc$sem_bc) * 1.05,
+           label = "Injection 2", fontface = "italic", size = 3) +
+  scale_color_manual(values = vax_colors) +
+  scale_x_continuous(breaks = c(0, 7, 14, 21, 28, 35)) +
+  labs(x = "Day", y = "Bray-Curtis Distance from Day 0",
+       title = "Within-Subject Microbiome Shift from Baseline",
+       color = "Vaccine Group") +
+  theme_cowplot()
+
+p_bc_line
+ggsave("../figs/Q3_bc_from_baseline_line.png", p_bc_line, width = 7, height = 4.5, dpi = 300)
+```
+
+### Box plots: BC distance from baseline at each timepoint
+
+```{r Q3-bc-boxplots, fig.width=14, fig.height=5}
+p_bc_box <- ggplot(bc_from_baseline, aes(x = `Vaccine Administered`, y = bc_from_d0,
+                                          fill = `Vaccine Administered`)) +
+  #geom_errorbar(stat = "summary", fun.data = mean_se, width = 0.3) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(aes(color = `Vaccine Administered`), height = 0, width = 0.15,
+              size = 1.5, alpha = 0.7) +
+  geom_signif(comparisons = list(c("RBC-PLGA", "WT EC-PLGA"),
+                                  c("RBC-PLGA", "-lpxM EC-PLGA")),
+              test = "wilcox.test", map_signif_level = TRUE, textsize = 3,
+              step_increase = 0.1) +
+  facet_wrap(~Day, nrow = 1, labeller = labeller(Day = function(x) paste("Day", x))) +
+  scale_fill_manual(values = vax_colors) +
+  scale_color_manual(values = vax_colors) +
+  labs(x = "", y = "BC Distance from Day 0",
+       title = "Within-Subject BC Distance from Baseline by Group") +
+  theme_cowplot() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    legend.position = "none",
+    strip.background = element_blank()
+  )
+
+p_bc_box
+ggsave("../figs/Q3_bc_from_baseline_boxplots.png", p_bc_box, width = 14, height = 5, dpi = 300, bg = 'white')
+```
+
+### LMM on BC distance from baseline
+
+```{r bc-lmm}
+lmm_bc <- lmer(bc_from_d0 ~ Day * `Vaccine Administered` + (1|Mouse), data = bc_from_baseline)
+summary(lmm_bc)
+
+#Looks like the lmm doesn't see these variables as significantly different Bray curtis distances
+#`Vaccine Administered`WT EC-PLGA          0.049385   0.043080 135.795853   1.146  0.25366    
+#`Vaccine Administered`-lpxM EC-PLGA       0.071321   0.042170 135.806867   1.691  0.09308 
+
+anno_p_bc_line <- p_bc_line + annotate("text", x = 21, y = -Inf, hjust = -0.05, vjust = -0.5, size = 2.8,
+           label = "LMM: WT vs RBC, p=0.253\n  ΔlpxM vs RBC, p=0.093",
+           family = "mono")
+
+ggsave("../figs/Q3_bc_from_baseline_line.png", anno_p_bc_line, width = 7, height = 4.5, dpi = 300, bg='white')
+
+```
+
+### Mann-Whitney U at each timepoint
+
+```{r bc-mannwhitney}
+bc_mw <- data.frame()
+
+for (d in sort(unique(bc_from_baseline$Day))) {
+  sub <- bc_from_baseline %>% filter(Day == d)
+  rbc <- sub %>% filter(`Vaccine Administered` == "RBC-PLGA") %>% pull(bc_from_d0)
+  wt <- sub %>% filter(`Vaccine Administered` == "WT EC-PLGA") %>% pull(bc_from_d0)
+  lpxm <- sub %>% filter(`Vaccine Administered` == "-lpxM EC-PLGA") %>% pull(bc_from_d0)
+
+  bc_mw <- rbind(bc_mw, data.frame(
+    Day = d,
+    `RBC vs WT` = round(wilcox.test(rbc, wt, exact = FALSE)$p.value, 4),
+    `RBC vs dlpxM` = round(wilcox.test(rbc, lpxm, exact = FALSE)$p.value, 4),
+    `WT vs dlpxM` = round(wilcox.test(wt, lpxm, exact = FALSE)$p.value, 4),
+    check.names = FALSE
+  ))
+}
+
+write_csv(bc_mw, "../output/Q3_bc_from_baseline_mannwhitney.csv")
+knitr::kable(bc_mw, caption = "Mann-Whitney U p-values on BC distance from baseline")
+```
+
+## Analysis 3: PCoA on CLR-delta from baseline
+
+For each mouse at each post-baseline timepoint, subtract its Day 0 CLR-transformed genus profile from the current timepoint's CLR profile. Ordinate these delta vectors using PCoA on Euclidean distance (equivalent to Aitchison distance on the compositional changes). This shows whether the direction and magnitude of compositional change differs by treatment group, independent of starting composition.
+
+```{r clr-delta}
+# CLR transform genus counts (pseudocount 0.5)
+wide_genus_pseudo <- wide_genus + 0.5
+log_genus <- log(wide_genus_pseudo)
+geo_mean <- rowMeans(log_genus)
+clr_genus <- log_genus - geo_mean
+
+# Compute delta: each sample minus that mouse's Day 0
+d0_clr_map <- clr_genus[sample_ids %>% filter(Day == 0) %>% pull(seqid), ]
+rownames(d0_clr_map) <- sample_ids %>% filter(Day == 0) %>% pull(Mouse)
+
+post_ids <- sample_ids %>% filter(Day > 0, Mouse %in% rownames(d0_clr_map))
+clr_delta <- clr_genus[post_ids$seqid, ] - d0_clr_map[as.character(post_ids$Mouse), ]
+rownames(clr_delta) <- post_ids$seqid
+```
+
+```{r clr-delta-pcoa, fig.width=25, fig.height=5}
+delta_permanova <- data.frame()
+plots <- list()
+
+for (d in sort(unique(post_ids$Day))) {
+  day_ids <- post_ids %>% filter(Day == d) %>% pull(seqid)
+  day_delta <- clr_delta[day_ids, ]
+  day_meta <- post_ids %>% filter(Day == d) %>% arrange(match(seqid, day_ids))
+
+  # Euclidean distance on CLR delta = Aitchison distance on changes
+  day_dist <- dist(day_delta, method = "euclidean")
+  day_pcoa <- cmdscale(day_dist, k = 2, eig = TRUE)
+  day_eig <- day_pcoa$eig
+  day_prop <- day_eig / sum(day_eig[day_eig > 0]) * 100
+
+  pcoa_coords <- data.frame(
+    seqid = day_ids,
+    PC1 = day_pcoa$points[,1],
+    PC2 = day_pcoa$points[,2]
+  ) %>% inner_join(day_meta, by = "seqid")
+
+  # Pairwise PERMANOVA
+  comparisons <- list(
+    c("RBC-PLGA", "WT EC-PLGA"),
+    c("RBC-PLGA", "-lpxM EC-PLGA"),
+    c("WT EC-PLGA", "-lpxM EC-PLGA")
+  )
+
+  for (comp in comparisons) {
+    idx <- day_meta$`Vaccine Administered` %in% comp
+    sub_delta <- day_delta[idx, ]
+    sub_grp <- day_meta$`Vaccine Administered`[idx]
+
+    if (length(unique(sub_grp)) < 2 || nrow(sub_delta) < 4) next
+
+    sub_dist <- dist(sub_delta, method = "euclidean")
+    perm_res <- adonis2(sub_dist ~ sub_grp, permutations = 999)
+
+    delta_permanova <- rbind(delta_permanova, data.frame(
+      Day = d,
+      Comparison = paste(comp[1], "vs", comp[2]),
+      `pseudo-F` = round(perm_res$F[1], 4),
+      p.value = perm_res$`Pr(>F)`[1],
+      check.names = FALSE
+    ))
+  }
+
+  # Build plot
+  p <- ggplot(pcoa_coords, aes(x = PC1, y = PC2, color = `Vaccine Administered`,
+                                fill = `Vaccine Administered`)) +
+    stat_ellipse(geom = "polygon", alpha = 0.1, linewidth = 0.8, level = 0.95, type = "norm") +
+    geom_point(size = 3, alpha = 0.8) +
+    scale_color_manual(values = vax_colors) +
+    scale_fill_manual(values = vax_colors) +
+    labs(
+      x = sprintf("PC1 (%.1f%%)", day_prop[1]),
+      y = sprintf("PC2 (%.1f%%)", day_prop[2]),
+      title = paste("Day", d)
+    ) +
+    guides(fill = "none") +
+    theme_cowplot() +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold"))
+
+  plots[[as.character(d)]] <- p
+}
+
+legend <- get_legend(
+  plots[["7"]] + theme(legend.position = "right") +
+    guides(fill = "none") + labs(color = "Vaccine Group")
+)
+
+p_delta_pcoa <- plot_grid(
+  plot_grid(plotlist = plots, nrow = 1),
+  legend, rel_widths = c(1, 0.1)
+)
+
+title <- ggdraw() + draw_label("PCoA on CLR-Delta from Baseline (Aitchison Distance, Per-Day)",
+                                fontface = "bold", size = 14)
+p_delta_pcoa <- plot_grid(title, p_delta_pcoa, ncol = 1, rel_heights = c(0.06, 1))
+
+p_delta_pcoa
+ggsave("../figs/Q3_clr_delta_pcoa_per_day.png", p_delta_pcoa, width = 25, height = 5, dpi = 300)
+```
+
+### CLR-delta PERMANOVA results
+
+```{r delta-permanova-table}
+write_csv(delta_permanova, "../output/Q3_clr_delta_permanova.csv")
+knitr::kable(delta_permanova, caption = "Pairwise PERMANOVA on CLR-delta (Aitchison distance, per-day)")
+
+
+```
